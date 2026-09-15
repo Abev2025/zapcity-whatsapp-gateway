@@ -1,3 +1,4 @@
+import { createServer } from "node:http";
 import { gameApi } from "./api.ts";
 import { config } from "./config.ts";
 import { Queue } from "./queue.ts";
@@ -11,8 +12,22 @@ function buildProvider(): WhatsAppProvider {
   return config.provider === "cloud-api" ? new CloudApiProvider() : new BaileysProvider();
 }
 
+function startHealthServer() {
+  const server = createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", provider: config.provider, uptime: process.uptime() }));
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  server.listen(config.port, () => console.log(`[gateway] /health ouvindo na porta ${config.port}`));
+  return server;
+}
+
 async function main() {
   const provider = buildProvider();
+  const health = config.provider === "cloud-api" ? null : startHealthServer();
   console.log(`[gateway] provider: ${provider.name} · api: ${config.apiBaseUrl}`);
 
   await provider.connect((message: IncomingMessage) => {
@@ -32,6 +47,7 @@ async function main() {
   const shutdown = async () => {
     console.log("[gateway] encerrando…");
     await provider.disconnect();
+    health?.close();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

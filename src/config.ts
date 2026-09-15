@@ -6,6 +6,10 @@ export const config = {
   serviceSecret: process.env["BOT_SERVICE_SECRET"] ?? "",
   /** "baileys" | "cloud-api" */
   provider: process.env["WHATSAPP_PROVIDER"] ?? "baileys",
+  /** Diretório onde o Baileys salva a sessão (use um volume em produção). */
+  baileysAuthPath: process.env["BAILEYS_AUTH_PATH"] ?? "./.wa-session",
+  /** Porta do servidor HTTP (/health e webhooks da Cloud API). */
+  port: Number(process.env["PORT"] ?? 8787),
   /** Cloud API (só usado quando provider = cloud-api) */
   cloudApi: {
     token: process.env["WHATSAPP_CLOUD_TOKEN"] ?? "",
