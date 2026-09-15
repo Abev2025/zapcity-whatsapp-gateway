@@ -1,4 +1,4 @@
-import type { IncomingMessage, WhatsAppProvider } from "./provider.ts";
+import type { IncomingMessage, OutgoingImage, WhatsAppProvider } from "./provider.ts";
 import { config } from "../config.ts";
 import { setConnected, setDisconnected, setQr } from "../qr-state.ts";
 
@@ -194,15 +194,37 @@ export class BaileysProvider implements WhatsAppProvider {
     await this.socket.sendMessage(whatsappId, { text });
   }
 
+  /** Envia imagem em memória (Buffer). Não depende de URL pública. */
+  async sendImage(chatId: string, image: OutgoingImage, caption?: string) {
+    await this.socket.sendMessage(chatId, {
+      image: Buffer.from(image.base64, "base64"),
+      mimetype: image.mimetype,
+      caption,
+    });
+  }
+
   /**
    * Resposta pública. Em grupo, garante metadata carregado, usa sempre o
    * remoteJid original (nunca o participant) e trata "No sessions" como erro
    * recuperável, com no máximo 3 tentativas e fallback para o privado.
    */
-  async sendPublicReply(message: IncomingMessage, text: string) {
+  async sendPublicReply(message: IncomingMessage, text: string, image?: OutgoingImage) {
     const groupJid = message.group?.whatsappGroupId;
+    const send = async (jid: string) => {
+      if (image) {
+        try {
+          await this.sendImage(jid, image, text);
+          return;
+        } catch (error) {
+          // Fallback: mantém o comando funcional só com texto.
+          console.warn(`[group-send] falha ao enviar imagem, usando texto (${(error as Error).message})`);
+        }
+      }
+      await this.socket.sendMessage(jid, { text });
+    };
+
     if (!groupJid) {
-      await this.sendText(message.sender.whatsappId, text);
+      await send(message.sender.whatsappId);
       return;
     }
 
@@ -219,7 +241,7 @@ export class BaileysProvider implements WhatsAppProvider {
         metaLoaded = "nao";
       }
       try {
-        await this.socket.sendMessage(groupJid, { text });
+        await send(groupJid);
         console.log(
           `[group-send] remoteJid=${safeChatRef(groupJid)} participant=${participantType} participantAlt=${hasAlt} metadata=${metaLoaded} tentativa=${attempt} resultado=ok`,
         );
@@ -248,7 +270,7 @@ export class BaileysProvider implements WhatsAppProvider {
     console.warn(
       `[group-send] group_send_fallback_private remoteJid=${safeChatRef(groupJid)} participant=${participantType} participantAlt=${hasAlt} destino=${jidKind(privateJid)}`,
     );
-    await this.sendPrivate(privateJid, text);
+    await send(privateJid);
   }
 
   async disconnect() {
