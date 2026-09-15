@@ -1,4 +1,5 @@
 import type { IncomingMessage, WhatsAppProvider } from "./provider.ts";
+import { config } from "../config.ts";
 
 /**
  * Provider Baileys (WhatsApp Web, número comum).
@@ -8,16 +9,48 @@ export class BaileysProvider implements WhatsAppProvider {
   readonly name = "baileys";
   private socket: any = null;
 
-  async connect(onMessage: (message: IncomingMessage) => void) {
+  private onMessage?: (message: IncomingMessage) => void;
+
+  async connect(onMessage?: (message: IncomingMessage) => void) {
+    if (onMessage) this.onMessage = onMessage;
     const baileys: any = await import("@whiskeysockets/baileys");
-    const { state, saveCreds } = await baileys.useMultiFileAuthState("./.wa-session");
-    this.socket = baileys.makeWASocket({ auth: state, printQRInTerminal: true });
+    const qrcodeMod: any = await import("qrcode-terminal");
+    const qrcode = qrcodeMod.default ?? qrcodeMod;
+    const { state, saveCreds } = await baileys.useMultiFileAuthState(config.baileysAuthPath);
+    let version: any;
+    try {
+      ({ version } = await baileys.fetchLatestBaileysVersion());
+      console.log(`[whatsapp] versão do WhatsApp Web: ${version}`);
+    } catch {
+      console.warn("[whatsapp] não foi possível obter a versão mais recente; usando padrão do Baileys");
+    }
+    this.socket = baileys.makeWASocket({ auth: state, ...(version ? { version } : {}) });
 
     this.socket.ev.on("creds.update", saveCreds);
+    this.socket.ev.on("connection.update", (update: any) => {
+      const { connection, lastDisconnect, qr } = update ?? {};
+      if (qr) {
+        console.log("[whatsapp] QR code recebido — escaneie com o app do WhatsApp:");
+        qrcode.generate(qr, { small: true });
+      }
+      if (connection === "open") {
+        console.log("[whatsapp] conectado e autenticado");
+      }
+      if (connection === "close") {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== baileys.DisconnectReason?.loggedOut;
+        console.log(`[whatsapp] conexão fechada (code ${statusCode ?? "?"}), reconectar: ${shouldReconnect}`);
+        if (shouldReconnect) {
+          void this.connect(undefined);
+        } else {
+          console.error("[whatsapp] sessão encerrada (logged out) — apague o diretório de sessão e faça novo scan.");
+        }
+      }
+    });
     this.socket.ev.on("messages.upsert", async (event: any) => {
       for (const raw of event.messages ?? []) {
         const parsed = await this.toIncoming(raw);
-        if (parsed) onMessage(parsed);
+        if (parsed) this.onMessage?.(parsed);
       }
     });
   }
@@ -77,7 +110,14 @@ export class BaileysProvider implements WhatsAppProvider {
   }
 
   async disconnect() {
-    await this.socket?.logout?.();
+    // NÃO usar logout(): ele invalida a sessão no WhatsApp e exigiria novo scan
+    // a cada restart/deploy. Apenas fecha a conexão; as credenciais ficam salvas
+    // em BAILEYS_AUTH_PATH (volume persistente).
+    try {
+      this.socket?.end?.(undefined);
+    } catch {
+      // ignora erros ao encerrar
+    }
     this.socket = null;
   }
 }

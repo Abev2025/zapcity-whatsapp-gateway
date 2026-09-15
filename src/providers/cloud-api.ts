@@ -36,7 +36,7 @@ export class CloudApiProvider implements WhatsAppProvider {
       });
     });
 
-    this.server.listen(Number(process.env["PORT"] ?? 8787));
+    this.server.listen(config.port, () => console.log(`[cloud-api] webhook ouvindo na porta ${config.port}`));
   }
 
   private *parseWebhook(payload: any): Generator<IncomingMessage> {
