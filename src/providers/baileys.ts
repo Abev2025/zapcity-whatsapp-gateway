@@ -143,6 +143,7 @@ export class BaileysProvider implements WhatsAppProvider {
     // Para o motor do jogo preferimos a identidade telefônica quando disponível
     // (participantAlt em @s.whatsapp.net), sem inventar conversões de @lid.
     const phoneJid = [participant, participantAlt].find((j) => j?.endsWith("@s.whatsapp.net"));
+    const altSenderJid = [participant, participantAlt].find((j) => j?.endsWith("@lid"));
     const senderJid: string = (isGroup ? (phoneJid ?? participant) : remoteJid) ?? "";
     /** JID usado para envio privado (fallback): precisa ser endereçável. */
     const senderAddressable: string = phoneJid ?? participant ?? remoteJid;
@@ -150,10 +151,16 @@ export class BaileysProvider implements WhatsAppProvider {
 
     let isSenderAdmin = false;
     let groupName: string | undefined;
+    const lidToPhone = new Map<string, string>();
     if (isGroup) {
       try {
         const meta = await this.getGroupMetadata(remoteJid);
         groupName = meta?.subject;
+        for (const p of meta?.participants ?? []) {
+          const phone = [p.jid, p.id, p.phoneNumber].find((j: string | undefined) => j?.endsWith("@s.whatsapp.net"));
+          const lid = [p.lid, p.id].find((j: string | undefined) => j?.endsWith("@lid"));
+          if (phone && lid) lidToPhone.set(lid, phone);
+        }
         const ids = new Set([participant, participantAlt].filter(Boolean) as string[]);
         isSenderAdmin = !!meta?.participants?.find(
           (p: any) =>
@@ -175,12 +182,19 @@ export class BaileysProvider implements WhatsAppProvider {
         number: (phoneJid ?? senderJid).replace(/[^0-9]/g, ""),
         displayName: raw.pushName ?? undefined,
         ...(senderAddressable !== senderJid ? { addressableId: senderAddressable } : {}),
+        ...(altSenderJid ? { altWhatsappId: altSenderJid } : {}),
       } as IncomingMessage["sender"],
       ...(isGroup ? { group: { whatsappGroupId: remoteJid, name: groupName, isSenderAdmin } } : {}),
-      mentions: (contextInfo?.mentionedJid ?? []).map((jid: string) => ({
-        whatsappId: jid,
-        number: jid.replace(/[^0-9]/g, ""),
-      })),
+      mentions: (contextInfo?.mentionedJid ?? []).map((jid: string) => {
+        // Menções chegam frequentemente em @lid. Traduzimos para o JID
+        // telefônico usando os participantes do grupo, sem inventar conversões.
+        const resolved = jid.endsWith("@lid") ? (lidToPhone.get(jid) ?? jid) : jid;
+        return {
+          whatsappId: resolved,
+          number: resolved.replace(/[^0-9]/g, ""),
+          ...(resolved !== jid ? { altWhatsappId: jid } : {}),
+        };
+      }),
       // guardado para o envio (não usado pelo motor)
       ...({ _raw: { participant, participantAlt } } as any),
     };
