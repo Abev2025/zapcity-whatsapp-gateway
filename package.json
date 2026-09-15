@@ -1,0 +1,15 @@
+{
+  "name": "zap-city-whatsapp-gateway",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Gateway independente que conecta o WhatsApp ao motor do Zap City. Não contém regras de jogo.",
+  "scripts": {
+    "start": "node --experimental-strip-types src/index.ts",
+    "dev": "node --watch --experimental-strip-types src/index.ts"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
