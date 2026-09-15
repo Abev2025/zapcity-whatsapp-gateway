@@ -32,7 +32,11 @@ export interface BotResult {
   duplicated?: boolean;
   command: string | null;
   requestId: string;
-  reply: { text: string; visibility: "public" | "private" } | null;
+  reply: {
+    text: string;
+    visibility: "public" | "private";
+    image?: { base64: string; mimetype: string; filename?: string };
+  } | null;
   errorCode?: string | null;
   executionMs?: number;
 }
