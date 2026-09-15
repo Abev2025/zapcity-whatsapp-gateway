@@ -67,6 +67,9 @@ async function main() {
       const chatId = message.group?.whatsappGroupId ?? message.sender.whatsappId;
       if (result.reply.visibility === "private" && message.context === "group") {
         await provider.sendPrivate(message.sender.whatsappId, result.reply.text);
+      } else if (provider.sendPublicReply) {
+        // Grupos: metadata + retry de sessão + fallback privado ficam no provider.
+        await provider.sendPublicReply(message, result.reply.text);
       } else {
         await provider.sendText(chatId, result.reply.text);
       }
