@@ -1,5 +1,6 @@
 import type { IncomingMessage, WhatsAppProvider } from "./provider.ts";
 import { config } from "../config.ts";
+import { setConnected, setDisconnected, setQr } from "../qr-state.ts";
 
 /**
  * Provider Baileys (WhatsApp Web, número comum).
@@ -15,7 +16,7 @@ export class BaileysProvider implements WhatsAppProvider {
     if (onMessage) this.onMessage = onMessage;
     const baileys: any = await import("@whiskeysockets/baileys");
     const qrcodeMod: any = await import("qrcode-terminal");
-    const qrcode = qrcodeMod.default ?? qrcodeMod;
+    const qrcode = qrcodeMod.default ?? qrcodeMod; // mantido como fallback nos logs
     const { state, saveCreds } = await baileys.useMultiFileAuthState(config.baileysAuthPath);
     let version: any;
     try {
@@ -30,13 +31,22 @@ export class BaileysProvider implements WhatsAppProvider {
     this.socket.ev.on("connection.update", (update: any) => {
       const { connection, lastDisconnect, qr } = update ?? {};
       if (qr) {
-        console.log("[whatsapp] QR code recebido — escaneie com o app do WhatsApp:");
-        qrcode.generate(qr, { small: true });
+        // Salva o QR em memória para a página /whatsapp/qr e também imprime
+        // nos logs como fallback.
+        setQr(qr);
+        console.log("[whatsapp] QR disponível — abra /whatsapp/qr no navegador para escanear");
+        try {
+          qrcode.generate(qr, { small: true });
+        } catch {
+          // terminal indisponível: a página web já cobre a exibição
+        }
       }
       if (connection === "open") {
+        setConnected();
         console.log("[whatsapp] conectado e autenticado");
       }
       if (connection === "close") {
+        setDisconnected();
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== baileys.DisconnectReason?.loggedOut;
         console.log(`[whatsapp] conexão fechada (code ${statusCode ?? "?"}), reconectar: ${shouldReconnect}`);
