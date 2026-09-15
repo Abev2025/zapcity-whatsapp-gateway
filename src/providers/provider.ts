@@ -16,4 +16,9 @@ export interface WhatsAppProvider {
   disconnect(): Promise<void>;
   sendText(chatId: string, text: string): Promise<void>;
   sendPrivate(whatsappId: string, text: string): Promise<void>;
+  /**
+   * Resposta pública considerando o contexto original da mensagem.
+   * Providers podem tratar aqui particularidades de sessão de grupo.
+   */
+  sendPublicReply?(message: IncomingMessage, text: string): Promise<void>;
 }

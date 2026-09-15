@@ -2,6 +2,40 @@ import type { IncomingMessage, WhatsAppProvider } from "./provider.ts";
 import { config } from "../config.ts";
 import { setConnected, setDisconnected, setQr } from "../qr-state.ts";
 
+const GROUP_META_TTL_MS = 5 * 60 * 1000;
+const MAX_GROUP_SEND_ATTEMPTS = 3;
+
+type CachedMeta = { data: any; at: number };
+
+/** Erros de sessão Signal (LID/sender-key) são recuperáveis: metadata + retry. */
+function isSessionError(error: unknown): boolean {
+  const msg = String((error as Error)?.message ?? error ?? "");
+  const name = String((error as Error)?.name ?? "");
+  return (
+    /no sessions/i.test(msg) ||
+    /SessionError/i.test(name) ||
+    /session/i.test(msg) && /no |missing|record/i.test(msg)
+  );
+}
+
+/** Só o sufixo do JID vai para o log; nunca o número/identificador. */
+function jidKind(jid?: string): string {
+  if (!jid) return "none";
+  if (jid.endsWith("@lid")) return "@lid";
+  if (jid.endsWith("@s.whatsapp.net")) return "@s.whatsapp.net";
+  if (jid.endsWith("@g.us")) return "@g.us";
+  return "other";
+}
+
+/** Grupo só é logado pelo sufixo + tamanho, sem revelar o ID real. */
+function safeChatRef(jid?: string): string {
+  if (!jid) return "none";
+  const [id, server] = jid.split("@");
+  return `<${(id ?? "").length} chars>@${server ?? "?"}`;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Provider Baileys (WhatsApp Web, número comum).
  * Faz apenas tradução de eventos → IncomingMessage e envio de texto.
@@ -9,6 +43,7 @@ import { setConnected, setDisconnected, setQr } from "../qr-state.ts";
 export class BaileysProvider implements WhatsAppProvider {
   readonly name = "baileys";
   private socket: any = null;
+  private groupMeta = new Map<string, CachedMeta>();
 
   private onMessage?: (message: IncomingMessage) => void;
 
@@ -25,9 +60,21 @@ export class BaileysProvider implements WhatsAppProvider {
     } catch {
       console.warn("[whatsapp] não foi possível obter a versão mais recente; usando padrão do Baileys");
     }
-    this.socket = baileys.makeWASocket({ auth: state, ...(version ? { version } : {}) });
+    this.socket = baileys.makeWASocket({
+      auth: state,
+      ...(version ? { version } : {}),
+      // Deixa o Baileys reaproveitar o metadata em cache ao criar as sessões
+      // de grupo (sender-key), evitando "No sessions" no primeiro envio.
+      cachedGroupMetadata: async (jid: string) => this.getGroupMetadata(jid).catch(() => undefined),
+    });
 
     this.socket.ev.on("creds.update", saveCreds);
+    this.socket.ev.on("groups.update", (updates: any[]) => {
+      for (const u of updates ?? []) if (u?.id) this.groupMeta.delete(u.id);
+    });
+    this.socket.ev.on("group-participants.update", (update: any) => {
+      if (update?.id) this.groupMeta.delete(update.id);
+    });
     this.socket.ev.on("connection.update", (update: any) => {
       const { connection, lastDisconnect, qr } = update ?? {};
       if (qr) {
@@ -47,6 +94,7 @@ export class BaileysProvider implements WhatsAppProvider {
       }
       if (connection === "close") {
         setDisconnected();
+        this.groupMeta.clear();
         const statusCode = lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = statusCode !== baileys.DisconnectReason?.loggedOut;
         console.log(`[whatsapp] conexão fechada (code ${statusCode ?? "?"}), reconectar: ${shouldReconnect}`);
@@ -65,6 +113,15 @@ export class BaileysProvider implements WhatsAppProvider {
     });
   }
 
+  /** Metadata do grupo com cache curto; força refresh quando pedido. */
+  private async getGroupMetadata(groupJid: string, refresh = false): Promise<any | undefined> {
+    const cached = this.groupMeta.get(groupJid);
+    if (!refresh && cached && Date.now() - cached.at < GROUP_META_TTL_MS) return cached.data;
+    const data = await this.socket?.groupMetadata(groupJid);
+    if (data) this.groupMeta.set(groupJid, { data, at: Date.now() });
+    return data;
+  }
+
   private async toIncoming(raw: any): Promise<IncomingMessage | null> {
     if (!raw?.message || raw.key?.fromMe) return null;
     const text =
@@ -74,19 +131,34 @@ export class BaileysProvider implements WhatsAppProvider {
       "";
     if (!text) return null;
 
+    // remoteJid é sempre o chat de origem (grupo ou privado) e é o que usamos
+    // para responder. participant/participantAlt identificam o remetente e
+    // podem vir em @lid ou @s.whatsapp.net — preservamos os dois sem converter.
     const remoteJid: string = raw.key.remoteJid ?? "";
     const isGroup = remoteJid.endsWith("@g.us");
-    const senderJid: string = (isGroup ? raw.key.participant : remoteJid) ?? "";
+    const participant: string | undefined = raw.key.participant ?? undefined;
+    const participantAlt: string | undefined =
+      raw.key.participantAlt ?? raw.key.participantPn ?? raw.key.participantLid ?? undefined;
+
+    // Para o motor do jogo preferimos a identidade telefônica quando disponível
+    // (participantAlt em @s.whatsapp.net), sem inventar conversões de @lid.
+    const phoneJid = [participant, participantAlt].find((j) => j?.endsWith("@s.whatsapp.net"));
+    const senderJid: string = (isGroup ? (phoneJid ?? participant) : remoteJid) ?? "";
+    /** JID usado para envio privado (fallback): precisa ser endereçável. */
+    const senderAddressable: string = phoneJid ?? participant ?? remoteJid;
     const contextInfo = raw.message.extendedTextMessage?.contextInfo;
 
     let isSenderAdmin = false;
     let groupName: string | undefined;
     if (isGroup) {
       try {
-        const meta = await this.socket.groupMetadata(remoteJid);
+        const meta = await this.getGroupMetadata(remoteJid);
         groupName = meta?.subject;
+        const ids = new Set([participant, participantAlt].filter(Boolean) as string[]);
         isSenderAdmin = !!meta?.participants?.find(
-          (p: any) => p.id === senderJid && (p.admin === "admin" || p.admin === "superadmin"),
+          (p: any) =>
+            (ids.has(p.id) || ids.has(p.jid) || ids.has(p.lid)) &&
+            (p.admin === "admin" || p.admin === "superadmin"),
         );
       } catch {
         // metadados indisponíveis: trata como membro comum
@@ -100,14 +172,17 @@ export class BaileysProvider implements WhatsAppProvider {
       context: isGroup ? "group" : "private",
       sender: {
         whatsappId: senderJid,
-        number: senderJid.replace(/[^0-9]/g, ""),
+        number: (phoneJid ?? senderJid).replace(/[^0-9]/g, ""),
         displayName: raw.pushName ?? undefined,
-      },
+        ...(senderAddressable !== senderJid ? { addressableId: senderAddressable } : {}),
+      } as IncomingMessage["sender"],
       ...(isGroup ? { group: { whatsappGroupId: remoteJid, name: groupName, isSenderAdmin } } : {}),
       mentions: (contextInfo?.mentionedJid ?? []).map((jid: string) => ({
         whatsappId: jid,
         number: jid.replace(/[^0-9]/g, ""),
       })),
+      // guardado para o envio (não usado pelo motor)
+      ...({ _raw: { participant, participantAlt } } as any),
     };
   }
 
@@ -117,6 +192,63 @@ export class BaileysProvider implements WhatsAppProvider {
 
   async sendPrivate(whatsappId: string, text: string) {
     await this.socket.sendMessage(whatsappId, { text });
+  }
+
+  /**
+   * Resposta pública. Em grupo, garante metadata carregado, usa sempre o
+   * remoteJid original (nunca o participant) e trata "No sessions" como erro
+   * recuperável, com no máximo 3 tentativas e fallback para o privado.
+   */
+  async sendPublicReply(message: IncomingMessage, text: string) {
+    const groupJid = message.group?.whatsappGroupId;
+    if (!groupJid) {
+      await this.sendText(message.sender.whatsappId, text);
+      return;
+    }
+
+    const raw = (message as any)._raw ?? {};
+    const participantType = jidKind(raw.participant);
+    const hasAlt = raw.participantAlt ? "sim" : "nao";
+
+    for (let attempt = 1; attempt <= MAX_GROUP_SEND_ATTEMPTS; attempt += 1) {
+      let metaLoaded = "nao";
+      try {
+        const meta = await this.getGroupMetadata(groupJid, attempt > 1);
+        metaLoaded = meta ? "sim" : "nao";
+      } catch {
+        metaLoaded = "nao";
+      }
+      try {
+        await this.socket.sendMessage(groupJid, { text });
+        console.log(
+          `[group-send] remoteJid=${safeChatRef(groupJid)} participant=${participantType} participantAlt=${hasAlt} metadata=${metaLoaded} tentativa=${attempt} resultado=ok`,
+        );
+        return;
+      } catch (error) {
+        const recoverable = isSessionError(error);
+        console.warn(
+          `[group-send] remoteJid=${safeChatRef(groupJid)} participant=${participantType} participantAlt=${hasAlt} metadata=${metaLoaded} tentativa=${attempt} resultado=erro (${(error as Error).message}) recuperavel=${recoverable}`,
+        );
+        if (!recoverable || attempt === MAX_GROUP_SEND_ATTEMPTS) {
+          if (!recoverable) throw error;
+          break;
+        }
+        this.groupMeta.delete(groupJid);
+        await sleep(750 * attempt);
+      }
+    }
+
+    // Fallback: mantém o jogo utilizável mesmo sem sessão de grupo.
+    const privateJid =
+      [raw.participantAlt, raw.participant, (message.sender as any).addressableId, message.sender.whatsappId].find(
+        (j: string | undefined) => j?.endsWith("@s.whatsapp.net"),
+      ) ??
+      (message.sender as any).addressableId ??
+      message.sender.whatsappId;
+    console.warn(
+      `[group-send] group_send_fallback_private remoteJid=${safeChatRef(groupJid)} participant=${participantType} participantAlt=${hasAlt} destino=${jidKind(privateJid)}`,
+    );
+    await this.sendPrivate(privateJid, text);
   }
 
   async disconnect() {
@@ -129,5 +261,6 @@ export class BaileysProvider implements WhatsAppProvider {
       // ignora erros ao encerrar
     }
     this.socket = null;
+    this.groupMeta.clear();
   }
 }
