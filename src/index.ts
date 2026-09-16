@@ -129,11 +129,80 @@ function startHeistScanner(provider: WhatsAppProvider) {
   setInterval(() => void scan(), 5000);
 }
 
+const activeHeliDrops = new Set<string>();
+let heliScanRunning = false;
+
+/**
+ * Conduz um Drop Helicóptero: anúncio (com a foto), contagem de entrada,
+ * início e resultado final — cada etapa como uma mensagem nova no grupo.
+ */
+async function driveHelicopterDrop(
+  provider: WhatsAppProvider,
+  drop: { dropId: string; chatId: string; prefix: string },
+) {
+  if (activeHeliDrops.has(drop.dropId)) return;
+  activeHeliDrops.add(drop.dropId);
+  console.log(`[gateway] drop helicoptero conduzido: ${drop.dropId}`);
+  try {
+    let delay = 0;
+    let failures = 0;
+    for (let step = 0; step < 200; step += 1) {
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      try {
+        const tick = await gameApi.heliTick({ action: "heli", dropId: drop.dropId, prefix: drop.prefix });
+        delay = Math.max(1000, Number(tick.nextDelayMs ?? 3000));
+        const texts = [...(tick.texts ?? [])];
+        let first = true;
+        while (texts.length) {
+          const text = texts.shift() ?? "";
+          if (first && tick.image && provider.sendImage) {
+            await provider.sendImage(drop.chatId, tick.image, text);
+          } else {
+            await provider.sendText(drop.chatId, text);
+          }
+          first = false;
+          if (texts.length) await new Promise((r) => setTimeout(r, 900));
+        }
+        failures = 0;
+        if (tick.done) break;
+      } catch (error) {
+        failures += 1;
+        console.error("[gateway] falha na etapa do drop helicoptero", (error as Error).message);
+        if (failures >= 5) break;
+        delay = 3000;
+      }
+    }
+  } finally {
+    activeHeliDrops.delete(drop.dropId);
+  }
+}
+
+/** Faz nascer e conduzir os Drops Helicóptero (varredura a cada 20s). */
+function startHelicopterScanner(provider: WhatsAppProvider) {
+  const scan = async () => {
+    if (heliScanRunning) return;
+    heliScanRunning = true;
+    try {
+      const res = await gameApi.heliScan();
+      for (const drop of res.drops ?? []) {
+        if (!activeHeliDrops.has(drop.dropId)) void driveHelicopterDrop(provider, drop);
+      }
+    } catch (error) {
+      console.error("[gateway] falha ao procurar drops de helicoptero", (error as Error).message);
+    } finally {
+      heliScanRunning = false;
+    }
+  };
+  void scan();
+  setInterval(() => void scan(), 20000);
+}
+
 async function main() {
   const provider = buildProvider();
   const http = config.provider === "cloud-api" ? null : startHttpServer();
   console.log(`[gateway] provider: ${provider.name} · api: ${config.apiBaseUrl}`);
   startHeistScanner(provider);
+  startHelicopterScanner(provider);
 
   await provider.connect((message: IncomingMessage) => {
     queue.push(async () => {

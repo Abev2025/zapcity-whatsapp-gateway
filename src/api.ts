@@ -54,6 +54,16 @@ export interface HeistTickResult {
   kind?: string;
 }
 
+export interface HeliTickResult {
+  ok: boolean;
+  texts?: string[];
+  done?: boolean;
+  dropId?: string;
+  nextDelayMs?: number;
+  kind?: string;
+  image?: { base64: string; mimetype: string; filename?: string };
+}
+
 export interface BotResult {
   ok: boolean;
   ignored?: boolean;
@@ -90,6 +100,15 @@ export const gameApi = {
     call<{ ok: boolean; robberies?: { robberyId: string; chatId: string; prefix: string }[] }>(
       "/api/public/game-bot/message",
       { action: "heist-scan" },
+    ),
+  /** Avança uma etapa do Drop Helicóptero. */
+  heliTick: (input: { action: "heli"; dropId: string; prefix?: string }) =>
+    call<HeliTickResult>("/api/public/game-bot/message", input),
+  /** Faz nascer (nos minutos configurados) e lista os Drops Helicóptero ativos. */
+  heliScan: () =>
+    call<{ ok: boolean; drops?: { dropId: string; chatId: string; prefix: string }[] }>(
+      "/api/public/game-bot/message",
+      { action: "heli-scan" },
     ),
   status: () => call<Record<string, unknown>>("/api/public/game-bot/status", {}),
 };
