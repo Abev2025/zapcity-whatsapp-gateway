@@ -36,6 +36,14 @@ function safeChatRef(jid?: string): string {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+function decodeImage(image: OutgoingImage): Buffer {
+  const normalized = image.base64.trim().replace(/^data:[^;]+;base64,/, "");
+  if (!normalized) throw new Error("Imagem vazia recebida do jogo");
+  const buffer = Buffer.from(normalized, "base64");
+  if (buffer.byteLength < 32) throw new Error("Imagem inválida recebida do jogo");
+  return buffer;
+}
+
 /**
  * Provider Baileys (WhatsApp Web, número comum).
  * Faz apenas tradução de eventos → IncomingMessage e envio de texto.
@@ -233,8 +241,9 @@ export class BaileysProvider implements WhatsAppProvider {
 
   /** Envia imagem em memória (Buffer). Não depende de URL pública. */
   async sendImage(chatId: string, image: OutgoingImage, caption?: string) {
+    const buffer = decodeImage(image);
     await this.socket.sendMessage(chatId, {
-      image: Buffer.from(image.base64, "base64"),
+      image: buffer,
       mimetype: image.mimetype,
       caption,
     });
