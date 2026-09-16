@@ -4,11 +4,34 @@ import { config } from "./config.ts";
 import { Queue } from "./queue.ts";
 import { BaileysProvider } from "./providers/baileys.ts";
 import { CloudApiProvider } from "./providers/cloud-api.ts";
-import type { IncomingMessage, WhatsAppProvider } from "./providers/provider.ts";
+import type { IncomingMessage, OutgoingImage, WhatsAppProvider } from "./providers/provider.ts";
 import { renderQrPage } from "./qr-page.ts";
 import { getStatus, isQrAvailable } from "./qr-state.ts";
 
 const queue = new Queue();
+const HELI_MEDIA_TIMEOUT_MS = 12_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label}_timeout_${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function hasUsableImage(image: { base64: string; mimetype: string } | undefined): boolean {
+  if (!image?.base64?.trim() || !image.mimetype?.startsWith("image/")) return false;
+  const normalized = image.base64.trim().replace(/^data:[^;]+;base64,/, "");
+  return normalized.length >= 44;
+}
 
 function buildProvider(): WhatsAppProvider {
   return config.provider === "cloud-api" ? new CloudApiProvider() : new BaileysProvider();
@@ -146,28 +169,51 @@ async function driveHelicopterDrop(
   try {
     let delay = 0;
     let failures = 0;
+    let pendingTexts: string[] = [];
+    let pendingImage: OutgoingImage | undefined;
+    let pendingDone = false;
     for (let step = 0; step < 200; step += 1) {
-      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      if (delay > 0) await sleep(delay);
       try {
-        const tick = await gameApi.heliTick({ action: "heli", dropId: drop.dropId, prefix: drop.prefix });
-        delay = Math.max(1000, Number(tick.nextDelayMs ?? 3000));
-        const texts = [...(tick.texts ?? [])];
-        let first = true;
-        while (texts.length) {
-          const text = texts.shift() ?? "";
-          if (first && tick.image && provider.sendImage) {
-            await provider.sendImage(drop.chatId, tick.image, text);
-          } else {
-            await provider.sendText(drop.chatId, text);
+        if (!pendingTexts.length) {
+          const tick = await gameApi.heliTick({ action: "heli", dropId: drop.dropId, prefix: drop.prefix });
+          delay = Math.max(1000, Number(tick.nextDelayMs ?? 3000));
+          pendingTexts = [...(tick.texts ?? [])].filter((text) => text.trim().length > 0);
+          pendingImage = hasUsableImage(tick.image) ? tick.image : undefined;
+          pendingDone = Boolean(tick.done);
+          if (tick.image && !pendingImage) {
+            console.warn(`[gateway] imagem invalida ignorada no drop helicoptero ${drop.dropId}`);
           }
-          first = false;
-          if (texts.length) await new Promise((r) => setTimeout(r, 900));
+        }
+
+        // O texto é a confirmação oficial da etapa e sempre sai primeiro. A
+        // imagem é complementar: upload lento ou inválido nunca interrompe o evento.
+        while (pendingTexts.length) {
+          await provider.sendText(drop.chatId, pendingTexts[0] ?? "");
+          pendingTexts.shift();
+          if (pendingTexts.length) await sleep(900);
+        }
+
+        if (pendingImage && provider.sendImage) {
+          try {
+            await withTimeout(provider.sendImage(drop.chatId, pendingImage), HELI_MEDIA_TIMEOUT_MS, "heli_media");
+            console.log(`[gateway] imagem do drop helicoptero enviada: ${drop.dropId}`);
+          } catch (imageError) {
+            console.warn(
+              `[gateway] imagem do drop helicoptero ignorada; anuncio em texto preservado (${(imageError as Error).message})`,
+            );
+          } finally {
+            pendingImage = undefined;
+          }
         }
         failures = 0;
-        if (tick.done) break;
+        if (pendingDone) break;
       } catch (error) {
         failures += 1;
-        console.error("[gateway] falha na etapa do drop helicoptero", (error as Error).message);
+        console.error(
+          `[gateway] falha ao consultar/enviar texto do drop helicoptero (tentativa ${failures}/5)`,
+          (error as Error).message,
+        );
         if (failures >= 5) break;
         delay = 3000;
       }
