@@ -201,7 +201,30 @@ export class BaileysProvider implements WhatsAppProvider {
   }
 
   async sendText(chatId: string, text: string) {
-    await this.socket.sendMessage(chatId, { text });
+    if (!chatId.endsWith("@g.us")) {
+      await this.socket.sendMessage(chatId, { text });
+      return;
+    }
+
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= MAX_GROUP_SEND_ATTEMPTS; attempt += 1) {
+      try {
+        await this.getGroupMetadata(chatId, attempt > 1);
+        await this.socket.sendMessage(chatId, { text });
+        console.log(`[heist-send] grupo=${safeChatRef(chatId)} tentativa=${attempt} resultado=ok`);
+        return;
+      } catch (error) {
+        lastError = error;
+        const recoverable = isSessionError(error);
+        console.warn(
+          `[heist-send] grupo=${safeChatRef(chatId)} tentativa=${attempt} resultado=erro (${(error as Error).message}) recuperavel=${recoverable}`,
+        );
+        if (!recoverable || attempt === MAX_GROUP_SEND_ATTEMPTS) break;
+        this.groupMeta.delete(chatId);
+        await sleep(750 * attempt);
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("Falha ao enviar mensagem do assalto no grupo");
   }
 
   async sendPrivate(whatsappId: string, text: string) {
