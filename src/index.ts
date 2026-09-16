@@ -54,10 +54,86 @@ function startHttpServer() {
   return server;
 }
 
+const activeHeists = new Set<string>();
+let heistScanRunning = false;
+
+/**
+ * Conduz um assalto: envia CADA etapa como uma mensagem nova no grupo até o
+ * resultado final. Roda fora da fila e é retomado pelo scanner se cair.
+ */
+async function driveHeist(
+  provider: WhatsAppProvider,
+  heist: { robberyId: string; chatId: string; prefix: string },
+  firstDelayMs = 0,
+) {
+  if (activeHeists.has(heist.robberyId)) return;
+  activeHeists.add(heist.robberyId);
+  console.log(`[gateway] assalto conduzido: ${heist.robberyId}`);
+  try {
+    let delay = firstDelayMs;
+    let failures = 0;
+    let pendingTexts: string[] = [];
+    let pendingDone = false;
+    for (let step = 0; step < 200; step += 1) {
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      try {
+        if (!pendingTexts.length) {
+          const tick = await gameApi.heistTick({
+            action: "heist",
+            robberyId: heist.robberyId,
+            prefix: heist.prefix,
+          });
+          pendingTexts = [...(tick.texts ?? [])];
+          pendingDone = Boolean(tick.done);
+          // Enquanto está em formação, reconsulta em intervalos curtos para
+          // /adminiciarfac acordar o fluxo. Durante uma ação, respeita a janela.
+          const requestedDelay = Math.max(500, Number(tick.nextDelayMs ?? 2000));
+          delay = tick.kind === "waiting" ? Math.min(2000, requestedDelay) : requestedDelay;
+        }
+        while (pendingTexts.length) {
+          await provider.sendText(heist.chatId, pendingTexts[0] ?? "");
+          pendingTexts.shift();
+          await new Promise((r) => setTimeout(r, 900));
+        }
+        failures = 0;
+        if (pendingDone) break;
+      } catch (error) {
+        failures += 1;
+        console.error("[gateway] falha na etapa do assalto", (error as Error).message);
+        if (failures >= 5) break;
+        delay = 3000;
+      }
+    }
+  } finally {
+    activeHeists.delete(heist.robberyId);
+  }
+}
+
+/** Procura assaltos ativos a cada 5s e garante que cada um tenha um condutor. */
+function startHeistScanner(provider: WhatsAppProvider) {
+  const scan = async () => {
+    if (heistScanRunning) return;
+    heistScanRunning = true;
+    try {
+      const res = await gameApi.heistScan();
+      for (const rb of res.robberies ?? []) {
+        if (!activeHeists.has(rb.robberyId)) void driveHeist(provider, rb, 0);
+      }
+    } catch (error) {
+      console.error("[gateway] falha ao procurar assaltos", (error as Error).message);
+    } finally {
+      heistScanRunning = false;
+    }
+  };
+  void scan();
+  setInterval(() => void scan(), 5000);
+}
+
 async function main() {
   const provider = buildProvider();
   const http = config.provider === "cloud-api" ? null : startHttpServer();
   console.log(`[gateway] provider: ${provider.name} · api: ${config.apiBaseUrl}`);
+  startHeistScanner(provider);
 
   await provider.connect((message: IncomingMessage) => {
     queue.push(async () => {
@@ -66,6 +142,7 @@ async function main() {
 
       const chatId = message.group?.whatsappGroupId ?? message.sender.whatsappId;
       const image = result.reply.image;
+      const followUp = result.reply.followUp;
       if (result.reply.visibility === "private" && message.context === "group") {
         if (image && provider.sendImage) {
           await provider.sendImage(message.sender.whatsappId, image, result.reply.text);
@@ -79,6 +156,62 @@ async function main() {
         await provider.sendImage(chatId, image, result.reply.text);
       } else {
         await provider.sendText(chatId, result.reply.text);
+      }
+
+      // Mensagens com atraso nunca podem bloquear a fila: os jogadores precisam
+      // conseguir entrar no roubo e responder às ordens enquanto a contagem corre.
+      if (result.reply.sequence?.length) {
+        void (async () => {
+          for (const step of result.reply?.sequence ?? []) {
+            try {
+              if (step.delayMs > 0) await new Promise((r) => setTimeout(r, step.delayMs));
+              if (result.reply?.visibility === "private" && message.context === "group") {
+                await provider.sendPrivate(message.sender.whatsappId, step.text);
+              } else if (provider.sendPublicReply) {
+                await provider.sendPublicReply(message, step.text);
+              } else {
+                await provider.sendText(chatId, step.text);
+              }
+            } catch (error) {
+              console.error("[gateway] falha ao enviar etapa da narracao", (error as Error).message);
+            }
+          }
+        })();
+      }
+
+      // Assalto ao Banco Central: conduzido pelo scanner (independente da fila).
+      if (result.reply.heist) {
+        const chat = message.group?.whatsappGroupId ?? message.sender.whatsappId;
+        void driveHeist(provider, {
+          robberyId: result.reply.heist.robberyId,
+          chatId: chat,
+          prefix: result.reply.heist.prefix ?? "/",
+        }, result.reply.heist.delayMs);
+      }
+
+      // Depósito/saque: espera o atraso real (dinheiro segue exposto) e conclui.
+      if (followUp) {
+        console.log(`[gateway] operacao bancaria agendada: ${followUp.kind} em ${followUp.delayMs}ms`);
+        await new Promise((r) => setTimeout(r, followUp.delayMs));
+        try {
+          const done = await gameApi.finalizeBank(followUp);
+          if (done.reply?.text) {
+            if (provider.sendPublicReply) await provider.sendPublicReply(message, done.reply.text);
+            else await provider.sendText(chatId, done.reply.text);
+          }
+        } catch (error) {
+          console.error("[gateway] falha ao concluir operacao bancaria", (error as Error).message);
+          const failure =
+            followUp.kind === "deposit"
+              ? "❌ *Depósito cancelado*\n\nNão foi possível concluir a operação. Seu dinheiro permaneceu na carteira."
+              : "❌ *Saque cancelado*\n\nNão foi possível concluir a operação. Seu dinheiro permaneceu no banco.";
+          try {
+            if (provider.sendPublicReply) await provider.sendPublicReply(message, failure);
+            else await provider.sendText(chatId, failure);
+          } catch (sendError) {
+            console.error("[gateway] falha ao avisar cancelamento bancario", (sendError as Error).message);
+          }
+        }
       }
     });
   });
