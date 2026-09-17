@@ -1,4 +1,4 @@
-import type { IncomingMessage, OutgoingImage, WhatsAppProvider } from "./provider.ts";
+import type { IncomingMessage, OutgoingImage, ReplyButton, WhatsAppProvider } from "./provider.ts";
 import { config } from "../config.ts";
 import { setConnected, setDisconnected, setQr } from "../qr-state.ts";
 
@@ -132,7 +132,22 @@ export class BaileysProvider implements WhatsAppProvider {
 
   private async toIncoming(raw: any): Promise<IncomingMessage | null> {
     if (!raw?.message || raw.key?.fromMe) return null;
+    // Toques em botão chegam como buttonsResponseMessage/templateButtonReply/
+    // interactiveResponse: o id carrega o comando, tratado como texto digitado.
+    let nativeFlowId: string | undefined;
+    const paramsJson = raw.message.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson;
+    if (typeof paramsJson === "string") {
+      try {
+        const params = JSON.parse(paramsJson);
+        if (typeof params?.id === "string") nativeFlowId = params.id;
+      } catch {
+        nativeFlowId = undefined;
+      }
+    }
     const text =
+      raw.message.buttonsResponseMessage?.selectedButtonId ??
+      raw.message.templateButtonReplyMessage?.selectedId ??
+      nativeFlowId ??
       raw.message.conversation ??
       raw.message.extendedTextMessage?.text ??
       raw.message.imageMessage?.caption ??
@@ -250,11 +265,41 @@ export class BaileysProvider implements WhatsAppProvider {
   }
 
   /**
+   * Texto com botões de resposta rápida. Botões no Baileys não são suportados
+   * oficialmente: qualquer falha cai para texto puro (o comando continua no
+   * corpo da mensagem, então o jogador nunca fica travado).
+   */
+  async sendButtons(chatId: string, text: string, buttons: ReplyButton[]) {
+    try {
+      await this.socket.sendMessage(chatId, {
+        text,
+        footer: "Toque no botão ou digite o comando.",
+        buttons: buttons.slice(0, 3).map((b) => ({
+          buttonId: b.command,
+          buttonText: { displayText: b.label.slice(0, 20) },
+          type: 1,
+        })),
+        headerType: 1,
+        viewOnce: true,
+      });
+      console.log(`[buttons-send] grupo=${safeChatRef(chatId)} botoes=${buttons.length} resultado=ok`);
+    } catch (error) {
+      console.warn(`[buttons-send] grupo=${safeChatRef(chatId)} resultado=erro (${(error as Error).message}) fallback=texto`);
+      await this.sendText(chatId, text);
+    }
+  }
+
+  /**
    * Resposta pública. Em grupo, garante metadata carregado, usa sempre o
    * remoteJid original (nunca o participant) e trata "No sessions" como erro
    * recuperável, com no máximo 3 tentativas e fallback para o privado.
    */
-  async sendPublicReply(message: IncomingMessage, text: string, image?: OutgoingImage) {
+  async sendPublicReply(
+    message: IncomingMessage,
+    text: string,
+    image?: OutgoingImage,
+    buttons?: ReplyButton[],
+  ) {
     const groupJid = message.group?.whatsappGroupId;
     const send = async (jid: string) => {
       if (image) {
@@ -265,6 +310,10 @@ export class BaileysProvider implements WhatsAppProvider {
           // Fallback: mantém o comando funcional só com texto.
           console.warn(`[group-send] falha ao enviar imagem, usando texto (${(error as Error).message})`);
         }
+      }
+      if (buttons?.length) {
+        await this.sendButtons(jid, text, buttons);
+        return;
       }
       await this.socket.sendMessage(jid, { text });
     };

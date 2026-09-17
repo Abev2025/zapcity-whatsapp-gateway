@@ -17,6 +17,12 @@ export interface OutgoingImage {
   filename?: string;
 }
 
+/** Botão de resposta rápida vindo do jogo. */
+export interface ReplyButton {
+  command: string;
+  label: string;
+}
+
 export interface WhatsAppProvider {
   readonly name: string;
   connect(onMessage: (message: IncomingMessage) => void): Promise<void>;
@@ -27,7 +33,14 @@ export interface WhatsAppProvider {
    * Resposta pública considerando o contexto original da mensagem.
    * Providers podem tratar aqui particularidades de sessão de grupo.
    */
-  sendPublicReply?(message: IncomingMessage, text: string, image?: OutgoingImage): Promise<void>;
+  sendPublicReply?(
+    message: IncomingMessage,
+    text: string,
+    image?: OutgoingImage,
+    buttons?: ReplyButton[],
+  ): Promise<void>;
   /** Envia imagem (Buffer em memória) com legenda. Sem URL pública. */
   sendImage?(chatId: string, image: OutgoingImage, caption?: string): Promise<void>;
+  /** Texto com botões de resposta rápida (best-effort; cai para texto puro). */
+  sendButtons?(chatId: string, text: string, buttons: ReplyButton[]): Promise<void>;
 }
