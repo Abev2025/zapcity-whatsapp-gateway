@@ -258,6 +258,7 @@ async function main() {
       const chatId = message.group?.whatsappGroupId ?? message.sender.whatsappId;
       const image = result.reply.image;
       const followUp = result.reply.followUp;
+      const buttons = result.reply.buttons?.length ? result.reply.buttons : undefined;
       if (result.reply.visibility === "private" && message.context === "group") {
         if (image && provider.sendImage) {
           await provider.sendImage(message.sender.whatsappId, image, result.reply.text);
@@ -266,9 +267,11 @@ async function main() {
         }
       } else if (provider.sendPublicReply) {
         // Grupos: metadata + retry de sessão + fallback privado ficam no provider.
-        await provider.sendPublicReply(message, result.reply.text, image);
+        await provider.sendPublicReply(message, result.reply.text, image, buttons);
       } else if (image && provider.sendImage) {
         await provider.sendImage(chatId, image, result.reply.text);
+      } else if (buttons && provider.sendButtons) {
+        await provider.sendButtons(chatId, result.reply.text, buttons);
       } else {
         await provider.sendText(chatId, result.reply.text);
       }

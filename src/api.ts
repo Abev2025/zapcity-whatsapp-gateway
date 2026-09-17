@@ -77,6 +77,7 @@ export interface BotResult {
     followUp?: BankFollowUp;
     sequence?: { text: string; delayMs: number }[];
     heist?: HeistFollowUp;
+    buttons?: { command: string; label: string }[];
   } | null;
   errorCode?: string | null;
   executionMs?: number;
