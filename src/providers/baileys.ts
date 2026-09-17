@@ -265,29 +265,49 @@ export class BaileysProvider implements WhatsAppProvider {
   }
 
   /**
-   * Texto com botões de resposta rápida. Botões no Baileys não são suportados
-   * oficialmente: qualquer falha cai para texto puro (o comando continua no
-   * corpo da mensagem, então o jogador nunca fica travado).
+   * Texto com botões de resposta rápida.
+   * O WhatsApp já ignora o formato antigo (`buttons`), então usamos o
+   * interactiveMessage (nativeFlow quick_reply) via relayMessage, que é o que
+   * os aparelhos atuais renderizam. Qualquer falha cai para texto puro
+   * (o comando continua no corpo da mensagem).
    */
   async sendButtons(chatId: string, text: string, buttons: ReplyButton[]) {
+    const list = buttons.slice(0, 3);
     try {
-      await this.socket.sendMessage(chatId, {
-        text,
-        footer: "Toque no botão ou digite o comando.",
-        buttons: buttons.slice(0, 3).map((b) => ({
-          buttonId: b.command,
-          buttonText: { displayText: b.label.slice(0, 20) },
-          type: 1,
-        })),
-        headerType: 1,
-        viewOnce: true,
+      const baileys: any = await import("@whiskeysockets/baileys");
+      const content = {
+        viewOnceMessage: {
+          message: {
+            interactiveMessage: {
+              body: { text },
+              footer: { text: "Toque no botão ou digite o comando." },
+              nativeFlowMessage: {
+                buttons: list.map((b) => ({
+                  name: "quick_reply",
+                  buttonParamsJson: JSON.stringify({
+                    display_text: b.label.slice(0, 24),
+                    id: b.command,
+                  }),
+                })),
+                messageParamsJson: "",
+              },
+            },
+          },
+        },
+      };
+      const msg = baileys.generateWAMessageFromContent(chatId, content, {
+        userJid: this.socket?.user?.id,
       });
-      console.log(`[buttons-send] grupo=${safeChatRef(chatId)} botoes=${buttons.length} resultado=ok`);
+      await this.socket.relayMessage(chatId, msg.message, { messageId: msg.key.id });
+      console.log(`[buttons-send] chat=${safeChatRef(chatId)} botoes=${list.length} modo=nativeFlow resultado=ok`);
     } catch (error) {
-      console.warn(`[buttons-send] grupo=${safeChatRef(chatId)} resultado=erro (${(error as Error).message}) fallback=texto`);
+      console.warn(
+        `[buttons-send] chat=${safeChatRef(chatId)} resultado=erro (${(error as Error).message}) fallback=texto`,
+      );
       await this.sendText(chatId, text);
     }
   }
+
 
   /**
    * Resposta pública. Em grupo, garante metadata carregado, usa sempre o
