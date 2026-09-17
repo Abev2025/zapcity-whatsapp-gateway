@@ -272,40 +272,11 @@ export class BaileysProvider implements WhatsAppProvider {
    * (o comando continua no corpo da mensagem).
    */
   async sendButtons(chatId: string, text: string, buttons: ReplyButton[]) {
-    const list = buttons.slice(0, 3);
-    try {
-      const baileys: any = await import("@whiskeysockets/baileys");
-      const content = {
-        viewOnceMessage: {
-          message: {
-            interactiveMessage: {
-              body: { text },
-              footer: { text: "Toque no botão ou digite o comando." },
-              nativeFlowMessage: {
-                buttons: list.map((b) => ({
-                  name: "quick_reply",
-                  buttonParamsJson: JSON.stringify({
-                    display_text: b.label.slice(0, 24),
-                    id: b.command,
-                  }),
-                })),
-                messageParamsJson: "",
-              },
-            },
-          },
-        },
-      };
-      const msg = baileys.generateWAMessageFromContent(chatId, content, {
-        userJid: this.socket?.user?.id,
-      });
-      await this.socket.relayMessage(chatId, msg.message, { messageId: msg.key.id });
-      console.log(`[buttons-send] chat=${safeChatRef(chatId)} botoes=${list.length} modo=nativeFlow resultado=ok`);
-    } catch (error) {
-      console.warn(
-        `[buttons-send] chat=${safeChatRef(chatId)} resultado=erro (${(error as Error).message}) fallback=texto`,
-      );
-      await this.sendText(chatId, text);
-    }
+    // O WhatsApp descarta silenciosamente os formatos de botão fora da API
+    // oficial: a mensagem simplesmente não chega. Enviamos texto puro, que
+    // sempre chega, mantendo o comando no corpo da mensagem.
+    void buttons;
+    await this.sendText(chatId, text);
   }
 
 
