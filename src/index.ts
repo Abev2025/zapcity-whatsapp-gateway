@@ -283,10 +283,17 @@ async function main() {
           for (const step of result.reply?.sequence ?? []) {
             try {
               if (step.delayMs > 0) await new Promise((r) => setTimeout(r, step.delayMs));
+              const stepImage = hasUsableImage(step.image) ? step.image : undefined;
               if (result.reply?.visibility === "private" && message.context === "group") {
-                await provider.sendPrivate(message.sender.whatsappId, step.text);
+                if (stepImage && provider.sendImage) {
+                  await provider.sendImage(message.sender.whatsappId, stepImage, step.text);
+                } else {
+                  await provider.sendPrivate(message.sender.whatsappId, step.text);
+                }
               } else if (provider.sendPublicReply) {
-                await provider.sendPublicReply(message, step.text);
+                await provider.sendPublicReply(message, step.text, stepImage);
+              } else if (stepImage && provider.sendImage) {
+                await provider.sendImage(chatId, stepImage, step.text);
               } else {
                 await provider.sendText(chatId, step.text);
               }

@@ -75,7 +75,11 @@ export interface BotResult {
     visibility: "public" | "private";
     image?: { base64: string; mimetype: string; filename?: string };
     followUp?: BankFollowUp;
-    sequence?: { text: string; delayMs: number }[];
+    sequence?: {
+      text: string;
+      delayMs: number;
+      image?: { base64: string; mimetype: string; filename?: string };
+    }[];
     heist?: HeistFollowUp;
     buttons?: { command: string; label: string }[];
   } | null;
